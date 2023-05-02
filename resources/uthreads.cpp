@@ -82,6 +82,7 @@ struct Thread
 list<Thread *> *thread_list;
 list<Thread *> *ready_list;
 Thread *running_thread;
+Thread *to_be_deleted;
 Thread main_thread;
 sigjmp_buf env[MAX_THREAD_NUM];
 int total_quantums = 0;
@@ -134,8 +135,7 @@ void setup_thread (int tid, char *stack, thread_entry_point entry_point)
 
 void jump_to_thread (int tid)
 {
-  timer.it_value.tv_sec = quantum / 1000000;
-  timer.it_value.tv_usec = quantum - 1000000 * timer.it_value.tv_sec;
+  timer.it_value.tv_usec = quantum;
   siglongjmp (env[tid], 1);
 }
 
@@ -164,6 +164,12 @@ void context_switch ()
   if (did_just_save_bookmark)
   {
     jump_to_thread (running_thread->id);
+    if (to_be_deleted != NULL && to_be_deleted->id != 0)
+    {
+      delete[] to_be_deleted->sp;
+      delete[]to_be_deleted;
+      to_be_deleted = NULL;
+    }
   }
 }
 
@@ -217,13 +223,11 @@ int uthread_init (int quantum_usecs)
     return -1;
   }
   quantum = quantum_usecs;
-  int quantum_secs = quantum_usecs / 1000000;
-  timer.it_value.tv_sec = quantum_secs;
-  timer.it_value.tv_usec = quantum_usecs - 1000000 * quantum_secs;
-  timer.it_interval.tv_sec = quantum_secs;
-  timer.it_interval.tv_usec = quantum_usecs - 1000000 * quantum_secs;
+  timer.it_value.tv_usec = quantum_usecs;
+  timer.it_interval.tv_usec = quantum_usecs;
   main_thread = {0, Running};
   running_thread = &main_thread;
+  to_be_deleted = nullptr;
 
   //TODO: Start a virtual timer. It counts down whenever this process is
   // executing.
@@ -251,7 +255,8 @@ int uthread_spawn (thread_entry_point entry_point)
   ready_list->push_back (new_thread); // same
   if (running_thread->id == 0)
   {
-    main_thread.state=Ready;
+    main_thread.state = Ready;
+    ready_list->push_back (running_thread);
     context_switch ();
   }
   return id;
@@ -286,13 +291,20 @@ int uthread_terminate (int tid)
     //not main thread
   else
   {
+    int current_id = running_thread->id;
     Thread *found_thread = *target_thread;
     int new_available_id = (found_thread)->id;
     ready_list->remove (found_thread);
     thread_list->remove (found_thread);
-    // is a pointer
-    delete[] found_thread->sp;
-    delete found_thread;
+    //delete[] found_thread->sp;
+    //delete found_thread;
+    to_be_deleted = found_thread;
+    found_thread = NULL;
+    if (current_id == tid)
+    {
+      context_switch ();
+    }
+
     auto it = std::lower_bound (available_ids.begin (), available_ids.end (),
                                 new_available_id);
     available_ids.insert (it, new_available_id);
