@@ -20,19 +20,47 @@ using namespace std;
 #include <signal.h>
 #include <sys/time.h>
 
-typedef unsigned int address_t;
-#define JB_SP 4
-#define JB_PC 5
+#ifdef __x86_64__
+/* code for 64 bit Intel arch */
 
+typedef unsigned long address_t;
+#define JB_SP 6
+#define JB_PC 7
+
+/* A translation is required when using an address of a variable.
+   Use this as a black box in your code. */
 address_t translate_address (address_t addr)
 {
   address_t ret;
-  asm volatile("xor    %%gs:0x18,%0\n"
-               "rol    $0x9,%0\n"
+  asm volatile("xor    %%fs:0x30,%0\n"
+               "rol    $0x11,%0\n"
   : "=g" (ret)
   : "0" (addr));
   return ret;
 }
+
+#else
+/* code for 32 bit Intel arch */
+
+typedef unsigned int address_t;
+#define JB_SP 4
+#define JB_PC 5
+
+
+/* A translation is required when using an address of a variable.
+   Use this as a black box in your code. */
+address_t translate_address(address_t addr)
+{
+    address_t ret;
+    asm volatile("xor    %%gs:0x18,%0\n"
+                 "rol    $0x9,%0\n"
+    : "=g" (ret)
+    : "0" (addr));
+    return ret;
+}
+
+
+#endif
 
 enum Thread_State
 {
@@ -51,8 +79,8 @@ struct Thread
 };
 
 // defining variables
-list <Thread*> *thread_list;
-list <Thread*> *ready_list;
+list<Thread *> *thread_list;
+list<Thread *> *ready_list;
 Thread *running_thread;
 Thread main_thread;
 sigjmp_buf env[MAX_THREAD_NUM];
@@ -66,7 +94,7 @@ int available_id = 0;
 
 void fill_available_ids ()
 {
-  available_ids.clear();
+  available_ids.clear ();
   for (int i = 1; i <= MAX_THREAD_NUM; i++)
   {
     available_ids.push_back (i);
@@ -108,7 +136,6 @@ void jump_to_thread (int tid)
 {
   timer.it_value.tv_sec = quantum / 1000000;
   timer.it_value.tv_usec = quantum - 1000000 * timer.it_value.tv_sec;
-  total_quantums += 1;
   siglongjmp (env[tid], 1);
 }
 
@@ -118,12 +145,19 @@ void jump_to_thread (int tid)
 void context_switch ()
 {
   // handle external defined
-  running_thread = ready_list->front ();
-  ready_list->pop_front ();
+  int ret_val = sigsetjmp (env[running_thread->id], 1);
+  if (ready_list->empty ())
+  {
+    running_thread = &main_thread;
+  }
+  else
+  {
+    running_thread = ready_list->front ();
+    ready_list->pop_front ();
+  }
   running_thread->state = Running;
   running_thread->quantum_counter += 1;
 
-  int ret_val = sigsetjmp (env[running_thread->id], 1);
 //  printf("context_switch: ret_val=%d\n", ret_val);
   bool did_just_save_bookmark = ret_val == 0;
 //    bool did_jump_from_another_thread = ret_val != 0;
@@ -146,12 +180,16 @@ int get_available_id ()
 
 void timer_handler (int sig)
 {
-  //TODO:handle main (id=0)
-  // quantum expired
+  //TODO:handle sig
+  total_quantums += 1;
+  wake_up_threads ();
+  if (running_thread->id == 0)
+  {
+    return;
+  }
   running_thread->state = Ready;
   ready_list->push_back (running_thread);
   context_switch ();
-  wake_up_threads ();
 }
 
 int setup_timer (void)
@@ -164,13 +202,15 @@ int setup_timer (void)
   if (sigaction (SIGVTALRM, &sa, NULL) < 0)
   {
     printf ("sigaction error.");
+    return -1;
   }
+  return 0;
 }
-
 
 // origianl functions
 int uthread_init (int quantum_usecs)
 {
+  fill_available_ids ();
   setup_timer ();
   if (quantum_usecs <= 0)
   {
@@ -192,8 +232,8 @@ int uthread_init (int quantum_usecs)
     printf ("setitimer error.");
   }
 
-  thread_list = new list<Thread*> ();
-  ready_list = new list<Thread*> ();
+  thread_list = new list<Thread *> ();
+  ready_list = new list<Thread *> ();
   return 0;
 }
 
@@ -209,20 +249,25 @@ int uthread_spawn (thread_entry_point entry_point)
   Thread *new_thread = new Thread{id, Ready, stack};
   thread_list->push_back (new_thread); // about the *...
   ready_list->push_back (new_thread); // same
+  if (running_thread->id == 0)
+  {
+    main_thread.state=Ready;
+    context_switch ();
+  }
   return id;
 }
 
 int uthread_terminate (int tid)
 {
   auto target_thread = std::find_if (thread_list->begin (), thread_list->end (),
-                                     [&] (const Thread &t)
-                                     { return t.id == tid; });
+                                     [&] (const Thread *t)
+                                     { return t->id == tid; });
   // if thread with this id does not exist in thread list
   if (target_thread == thread_list->end ())
   {
     return -1;
   }
-  //if thread is the main-thread
+    //if thread is the main-thread
   else if (tid == 0)
   {
     for (const auto thread: *thread_list) // thread_list)?
@@ -234,14 +279,14 @@ int uthread_terminate (int tid)
     }
     delete ready_list;
     delete thread_list;
-    fill_available_ids();
-    exit(0);
+    fill_available_ids ();
+    exit (0);
   }
 
     //not main thread
   else
   {
-    Thread* found_thread = *target_thread;
+    Thread *found_thread = *target_thread;
     int new_available_id = (found_thread)->id;
     ready_list->remove (found_thread);
     thread_list->remove (found_thread);
@@ -270,12 +315,12 @@ int uthread_block (int tid)
     return 0;
   }
   auto target_thread = std::find_if (thread_list->begin (), thread_list->end (),
-                                     [&] (const Thread &t)
-                                     { return t.id == tid; });
+                                     [&] (const Thread *t)
+                                     { return t->id == tid; });
 
   if (target_thread != thread_list->end ())
   {
-    Thread* found_thread = *target_thread;
+    Thread *found_thread = *target_thread;
     if (found_thread->state == Blocked)
     {
       return 0;
@@ -294,13 +339,13 @@ int uthread_block (int tid)
 int uthread_resume (int tid)
 {
   auto target_thread = std::find_if (thread_list->begin (), thread_list->end
-  (),
-                                     [&] (const Thread &t)
-                                     { return t.id == tid; });
+                                         (),
+                                     [&] (const Thread *t)
+                                     { return t->id == tid; });
 
   if (target_thread != thread_list->end ())
   {
-    Thread* found_thread = *target_thread;
+    Thread *found_thread = *target_thread;
     if (found_thread->state != Blocked)
     {
       return 0;
@@ -321,7 +366,7 @@ int uthread_resume (int tid)
 
 int uthread_sleep (int num_quantums)
 {
-  if (num_quantums <=0 )
+  if (num_quantums <= 0)
   {
     return -1;
   }
@@ -345,9 +390,9 @@ int uthread_get_total_quantums ()
 int uthread_get_quantums (int tid)
 {
   auto target_thread = std::find_if (thread_list->begin (), thread_list->end
-  (),
-                                     [&] (const Thread &t)
-                                     { return t.id == tid; });
+                                         (),
+                                     [&] (const Thread *t)
+                                     { return t->id == tid; });
 
   if (target_thread != thread_list->end ())
   {
