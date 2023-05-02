@@ -166,6 +166,9 @@ void context_switch ()
     jump_to_thread (running_thread->id);
     if (to_be_deleted != NULL && to_be_deleted->id != 0)
     {
+      auto it = std::lower_bound (available_ids.begin (), available_ids.end (),
+                                  to_be_deleted->id);
+      available_ids.insert (it, to_be_deleted->id);
       delete[] to_be_deleted->sp;
       delete[]to_be_deleted;
       to_be_deleted = NULL;
